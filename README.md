@@ -1,52 +1,92 @@
 # OraEncryption
 
-Este repositório contém funções em PL/SQL para criptografia e descriptografia de strings utilizando os métodos de Cifras em SQL Oracle.
+Biblioteca PL/SQL de criptografia para Oracle Database (**12c ou superior**, testada para a faixa 12c–21c), com dois níveis:
 
-## Cifra de César
+| Módulo | Pacote | Para que serve | Seguro para dados reais? |
+|---|---|---|---|
+| `classic/` | `PKG_ORA_CLASSIC` | César e Vigenère (didático) | **Não** |
+| `crypto/` | `PKG_ORA_CRYPTO` | AES-256-CBC + HMAC-SHA256, PBKDF2 | Sim |
+| `hash/` | `PKG_ORA_HASH` | SHA-256/512, HMAC, hash de senhas | Sim |
+| `keys/` | `PKG_ORA_KEYS` | Chaves versionadas, envelope, rotação | Sim |
 
-A [Cifra de César](https://pt.wikipedia.org/wiki/Cifra_de_C%C3%A9sar), também conhecida como deslocamento de César, é um dos métodos mais simples e conhecidos de criptografia. É uma técnica de substituição onde cada letra no texto é substituída por outra letra que se encontra um número fixo de posições adiante no alfabeto. Por exemplo, com um deslocamento de 3, 'A' seria substituído por 'D', 'B' se tornaria 'E', e assim por diante. O nome vem do líder militar romano Júlio César, que usou essa técnica para se comunicar com seus generais.
+> ⚠️ César e Vigenère são quebráveis em segundos. Servem para estudo; para proteger dados use os demais módulos.
 
+## Instalação
 
-## Cifra de Vigenère
+Como `SYS`, uma vez: `GRANT EXECUTE ON SYS.DBMS_CRYPTO TO <usuario>;`
 
-A [Cifra de Vigenère](https://pt.wikipedia.org/wiki/Cifra_de_Vigen%C3%A8re) é um método de criptografia que utiliza uma série de diferentes cifras de César baseadas em letras de uma senha. É considerado uma forma de polialfabética substitutiva, pois utiliza várias cifras de César em sequência. A chave é uma palavra que é repetida ao longo do texto a ser cifrado. Cada letra da chave é usada para criptografar uma letra do texto original. Por isso, a cifra de Vigenère é considerada mais segura do que a cifra de César padrão.
+Na raiz do repositório:
 
+```bash
+sqlplus usuario/senha@banco @install.sql
+sqlplus usuario/senha@banco @tests/run_all.sql   # opcional
+```
 
-## Funções Implementadas
-
-- `ENCRYPT_CESAR(P_TEXTO VARCHAR2, P_DESLOCAMENTO NUMBER)`: Função para criptografar um texto usando a Cifra de César com um determinado deslocamento.
-- `DECRYPT_CESAR(P_TEXTO_CIFRADO VARCHAR2, P_DESLOCAMENTO NUMBER)`: Função para descriptografar um texto criptografado usando a Cifra de César com um determinado deslocamento.
-- `ENCRYPT_VIGENERE(P_TEXTO VARCHAR2, P_CHAVE VARCHAR2)`: Função para criptografar um texto usando a Cifra de Vigenère com uma determinada chave.
-- `DECRYPT_VIGENERE(P_TEXTO_CIFRADO VARCHAR2, P_CHAVE VARCHAR2)`: Função para descriptografar um texto criptografado usando a Cifra de Vigenère com uma determinada chave.
-
-
-## Como Usar
-
-Para utilizar essas funções, basta copiar e colar o código PL/SQL em seu ambiente Oracle. Após a criação das funções, você pode chamá-las em suas consultas SQL conforme necessário.
-
-Exemplo:
+## Cifras clássicas
 
 ```sql
--- Criptografando e descriptografando usando Cifra de César
+SELECT pkg_ora_classic.encrypt_cesar('Texto', 3) FROM dual;
+SELECT pkg_ora_classic.decrypt_vigenere('LXFOPVEFRNHR', 'lemon') FROM dual;
+```
+
+As funções standalone originais (`ENCRYPT_CESAR`, `DECRYPT_CESAR`, `ENCRYPT_VIGENERE`, `DECRYPT_VIGENERE`) continuam existindo e delegam ao pacote.
+
+**Mudanças de comportamento em relação à v1:** o deslocamento negativo/maior que 26 funciona; a chave do Vigenère é case-insensitive, só avança em letras (padrão clássico) e é validada (apenas A–Z). Textos cifrados com a versão antiga que continham espaços/pontuação **não** decifram igual.
+
+## Criptografia com senha (AES-256)
+
+```sql
 DECLARE
-  texto_cifrado VARCHAR2(4000);
-  texto_original VARCHAR2(4000);
+  v_token VARCHAR2(32767);
 BEGIN
-  texto_cifrado := ENCRYPT_CESAR('Texto a ser criptografado', 3);
-  DBMS_OUTPUT.PUT_LINE('Texto criptografado: ' || texto_cifrado);
-
-  texto_original := DECRYPT_CESAR(texto_cifrado, 3);
-  DBMS_OUTPUT.PUT_LINE('Texto descriptografado: ' || texto_original);
+  v_token := pkg_ora_crypto.encrypt_aes('dado sensível', 'minha-senha-forte');
+  DBMS_OUTPUT.PUT_LINE(pkg_ora_crypto.decrypt_aes(v_token, 'minha-senha-forte'));
 END;
+/
+```
 
--- Criptografando e descriptografando usando Cifra de Vigenère
-DECLARE
-  texto_cifrado VARCHAR2(4000);
-  texto_original VARCHAR2(4000);
+- AES-256-CBC com IV aleatório por chamada + HMAC-SHA256 (*encrypt-then-MAC*): adulteração ou senha errada geram `ORA-20010` antes de decifrar.
+- Senha → chave via PBKDF2-HMAC-SHA256 (padrão 100.000 iterações, salt de 16 bytes; o número de iterações vai no token). Implementado em PL/SQL puro para funcionar no 12c; é mais lento que código nativo, então ajuste `p_iterations` conforme seu hardware.
+- Para dados grandes ou binários: `encrypt_blob_pw` / `decrypt_blob_pw` (BLOB). Com chave binária de 32 bytes: `encrypt_blob` / `decrypt_blob` + `random_key`.
+- O Oracle 12c–21c não oferece AES-GCM no `DBMS_CRYPTO`; por isso a autenticação é feita com HMAC.
+
+## Hash e senhas
+
+```sql
+SELECT pkg_ora_hash.sha256('abc') FROM dual;
+
+-- armazenar e verificar senha de usuário
+UPDATE usuarios SET senha_hash = pkg_ora_hash.hash_password(:senha) WHERE id = :id;
+SELECT id FROM usuarios WHERE pkg_ora_hash.is_password_valid(:senha, senha_hash) = 1;
+```
+
+Nunca guarde senhas com `sha256` puro. `hash_password` usa PBKDF2 com salt aleatório e a verificação é em tempo constante.
+
+## Gestão de chaves e rotação
+
+Criptografia em envelope: **chave mestra** (fora do banco) → **KEK** versionada (tabela `ORA_KEYS`, sempre cifrada) → **DEK** aleatória por registro → dado.
+
+```sql
 BEGIN
-  texto_cifrado := ENCRYPT_VIGENERE('Texto a ser criptografado', 'chave');
-  DBMS_OUTPUT.PUT_LINE('Texto criptografado: ' || texto_cifrado);
+  -- a chave mestra vem de Wallet / OCI Vault / HSM, nunca fica no banco
+  pkg_ora_keys.set_master_key(:master_key_raw32);
 
-  texto_original := DECRYPT_VIGENERE(texto_cifrado, 'chave');
-  DBMS_OUTPUT.PUT_LINE('Texto descriptografado: ' || texto_original);
+  v_ver   := pkg_ora_keys.create_key('CPF');            -- v1
+  v_token := pkg_ora_keys.encrypt_text('CPF', '123.456.789-09');   -- 'v1.<base64>'
+
+  v_ver   := pkg_ora_keys.rotate_key('CPF');            -- v2; v1 vira RETIRED
+  v_token := pkg_ora_keys.reencrypt_text('CPF', v_token); -- migra o dado para v2
+  COMMIT;                                               -- as procedures não fazem commit
 END;
+/
+```
+
+`change_master_key(old, new)` reembrulha todas as KEKs sem tocar nos dados. Restrinja o acesso à tabela `ORA_KEYS` e ao pacote ao mínimo necessário e ative auditoria (Unified Auditing) sobre eles.
+
+## Limites conhecidos / roadmap
+
+- Cifragem assimétrica (RSA-OAEP, assinaturas) **não** está implementada: o `DBMS_CRYPTO` não oferece RSA e exigiria Java Stored Procedures (JCE) ou integração externa.
+- Não é testado em 12c localmente; o CI roda em Oracle XE 21. Rode `tests/run_all.sql` na sua versão antes de usar.
+- Textos acima de ~20.000 caracteres: use as variantes BLOB.
+
+Veja também [SECURITY.md](SECURITY.md).
