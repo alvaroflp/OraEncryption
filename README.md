@@ -86,7 +86,7 @@ END;
 ## Limites conhecidos / roadmap
 
 - Cifragem assimétrica (RSA-OAEP, assinaturas) **não** está implementada: o `DBMS_CRYPTO` não oferece RSA e exigiria Java Stored Procedures (JCE) ou integração externa.
-- Não é testado em 12c localmente; o CI roda em Oracle XE 21. Rode `tests/run_all.sql` na sua versão antes de usar.
+- Não há testes automatizados rodando em CI. Rode `tests/run_all.sql` na sua versão do Oracle antes de usar.
 - Textos acima de ~20.000 caracteres: use as variantes BLOB.
 
 Veja também [SECURITY.md](SECURITY.md).
